@@ -1,0 +1,37 @@
+# Replace example identities and choose your own branch names before enabling releases.
+# AppSpec + Secret references + branch mappings live here. Secret values never do.
+project:
+  name: Example application
+  description: Replace with your application description
+namespace: icmpcs-soims
+funcname: example-app
+dnshostname: example-app.s33prod.mfg.intel.com
+targetname: active
+action: create
+containers:
+- image: amr-registry.caas.intel.com/soia/example-app:pending
+  resources:
+    requests:
+      cpu: 2
+      gpu:
+        type: nvidia.com/gpu
+        quantity: 0
+      mem: 1000
+  usesInferenceClient: true
+  volume: []
+  environmentvariable:
+    ENV_MODE: test
+    SCRIPT_NAME: example
+version: '1.0'
+maxinstances: 1
+mininstances: 1
+targetclients: []
+deadline: ''
+loglabel: python-ecs
+secrets:
+  pull: itcaas-regcred
+  env: {}
+  check: {}
+branches:
+  release: ''
+  sandbox: -sandbox

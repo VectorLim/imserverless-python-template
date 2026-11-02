@@ -1,0 +1,185 @@
+name: Build, push and deploy release branches
+
+# Release branches and their app suffixes are listed under `branches` in release.yaml.
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Update IMServerless after pushing (release.yaml target)
+        type: boolean
+        default: false
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: [self-hosted, linux, x64, imserverless-release]
+    environment: release
+    timeout-minutes: 30
+    env:
+      RELEASE_BRANCH: ${{ github.ref_name }}
+      DEPLOY: ${{ github.event_name == 'push' || inputs.deploy }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # This GHES instance does not mirror the pinned actions/checkout release.
+      - name: Check out the pushed commit
+        env:
+          CHECKOUT_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          source_dir=$(mktemp -d "$RUNNER_TEMP/release-source-XXXXXX")
+          job="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          {
+            printf 'RELEASE_SOURCE=%s\n' "$source_dir"
+            printf 'DOCKER_CONFIG=%s/release-docker-%s\n' "$RUNNER_TEMP" "$job"
+            printf 'KUBECONFIG=%s/release-kubeconfig-%s\n' "$RUNNER_TEMP" "$job"
+            printf 'RELEASE_VENV=%s/release-python-%s\n' "$RUNNER_TEMP" "$job"
+          } >> "$GITHUB_ENV"
+          git -C "$source_dir" init
+          auth_header=$(printf 'x-access-token:%s' "$CHECKOUT_TOKEN" | base64 -w0)
+          printf '::add-mask::%s\n' "$auth_header"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0="http.$GITHUB_SERVER_URL/.extraheader" \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth_header" \
+            git -C "$source_dir" fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git -C "$source_dir" checkout --detach FETCH_HEAD
+
+      - name: Resolve the release target for this branch
+        run: |
+          set -euo pipefail
+          cd "$RELEASE_SOURCE"
+          python3 -m venv "$RELEASE_VENV"
+          "$RELEASE_VENV/bin/python" -m pip install --quiet 'PyYAML==6.0.3'
+          plan=$("$RELEASE_VENV/bin/python" -m automation plan --branch "$RELEASE_BRANCH")
+          printf '%s\n' "$plan" >> "$GITHUB_ENV"
+          if [[ "$plan" == RELEASE=false ]]; then
+            echo "Branch $RELEASE_BRANCH is not listed under release.yaml branches; nothing to release." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check tooling and offline release tests
+        if: ${{ env.RELEASE == 'true' }}
+        run: |
+          set -euo pipefail
+          cd "$RELEASE_SOURCE"
+          test "$(docker info --format '{{.OSType}}')" = linux
+          "$RELEASE_VENV/bin/python" -m unittest -v test_release
+
+      - name: Prepare deployment credentials and check prerequisites
+        if: ${{ env.RELEASE == 'true' && env.DEPLOY == 'true' }}
+        env:
+          RANCHER_KUBECONFIG: ${{ secrets.RANCHER_KUBECONFIG }}
+          RANCHER_CONTEXT: ${{ vars.RANCHER_CONTEXT }}
+          IMSERVERLESS_HOSTNAME: ${{ vars.IMSERVERLESS_HOSTNAME }}
+          IMSERVERLESS_OWNER: ${{ vars.IMSERVERLESS_OWNER }}
+          IMSERVERLESS_DOMAIN: ${{ vars.IMSERVERLESS_DOMAIN }}
+        run: |
+          set -euo pipefail
+          cd "$RELEASE_SOURCE"
+          RANCHER_CONTEXT="${RANCHER_CONTEXT:-${RUNNER_RANCHER_CONTEXT:-}}"
+          IMSERVERLESS_HOSTNAME="${IMSERVERLESS_HOSTNAME:-${RUNNER_IMSERVERLESS_HOSTNAME:-}}"
+          IMSERVERLESS_OWNER="${IMSERVERLESS_OWNER:-${RUNNER_IMSERVERLESS_OWNER:-}}"
+          IMSERVERLESS_DOMAIN="${IMSERVERLESS_DOMAIN:-${RUNNER_IMSERVERLESS_DOMAIN:-}}"
+          : "${RANCHER_CONTEXT:?Set RANCHER_CONTEXT}"
+          : "${IMSERVERLESS_OWNER:?Set IMSERVERLESS_OWNER}"
+          : "${IMSERVERLESS_DOMAIN:?Set IMSERVERLESS_DOMAIN}"
+          umask 077
+          if [[ -n "$RANCHER_KUBECONFIG" ]]; then
+            printf '%s' "$RANCHER_KUBECONFIG" > "$KUBECONFIG"
+          elif [[ -n "${RUNNER_KUBECONFIG:-}" && -r "$RUNNER_KUBECONFIG" ]]; then
+            cp -- "$RUNNER_KUBECONFIG" "$KUBECONFIG"
+          else
+            echo 'Provide RANCHER_KUBECONFIG or a runner-mounted RUNNER_KUBECONFIG' >&2
+            exit 1
+          fi
+          for key in RANCHER_CONTEXT IMSERVERLESS_HOSTNAME IMSERVERLESS_OWNER IMSERVERLESS_DOMAIN; do
+            printf '%s=%s\n' "$key" "${!key}" >> "$GITHUB_ENV"
+          done
+          "$RELEASE_VENV/bin/python" -m automation preflight --branch "$RELEASE_BRANCH" \
+            --kubeconfig "$KUBECONFIG" --context "$RANCHER_CONTEXT"
+
+      - name: Log in to Harbor
+        if: ${{ env.RELEASE == 'true' }}
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOCKER_CONFIG"
+          chmod 700 "$DOCKER_CONFIG"
+          if [[ -n "$REGISTRY_USERNAME" && -n "$REGISTRY_PASSWORD" ]]; then
+            printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin
+          elif [[ -f "$KUBECONFIG" && -n "${RANCHER_CONTEXT:-}" ]]; then
+            cd "$RELEASE_SOURCE"
+            "$RELEASE_VENV/bin/python" -m automation registry-login --branch "$RELEASE_BRANCH" \
+              --kubeconfig "$KUBECONFIG" --context "$RANCHER_CONTEXT" --docker-config "$DOCKER_CONFIG"
+            echo 'Using the existing Rancher registry Secret'
+          else
+            echo 'Provide registry credentials or Rancher access to the release.yaml pull Secret' >&2
+            exit 1
+          fi
+
+      - name: Build a unique Linux image
+        if: ${{ env.RELEASE == 'true' }}
+        run: |
+          set -euo pipefail
+          cd "$RELEASE_SOURCE"
+          image="$IMAGE_REPOSITORY:ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA:0:12}"
+          printf 'RELEASE_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+          docker build --platform linux/amd64 --provenance=false \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            -f dockerfile -t "$image" .
+
+      - name: Check packaged imports and credentials exclusion
+        if: ${{ env.RELEASE == 'true' }}
+        run: |
+          set -euo pipefail
+          cd "$RELEASE_SOURCE"
+          docker run --rm --network none --entrypoint python "$RELEASE_IMAGE" -c 'from pathlib import Path; assert not Path("/app/.env").exists(); assert not Path("/app/secret/key.key").exists(); assert not Path("/app/secret/config_new.json").exists(); import main; assert callable(main.handle); print("Packaged credential files absent; application imports OK")'
+          check_container="release-check-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          trap 'docker rm -f "$check_container" >/dev/null 2>&1 || true' EXIT
+          docker create --name "$check_container" --network none --entrypoint python \
+            "$RELEASE_IMAGE" -m unittest -v test_main >/dev/null
+          for test_file in test_main.py; do
+            docker cp "$test_file" "$check_container:/app/$test_file"
+          done
+          docker start -a "$check_container"
+          test "$(docker inspect "$check_container" --format '{{.State.ExitCode}}')" = 0
+
+      - name: Push the validated image and record its digest
+        if: ${{ env.RELEASE == 'true' }}
+        run: |
+          set -euo pipefail
+          docker push "$RELEASE_IMAGE"
+          digest_ref=$(docker image inspect "$RELEASE_IMAGE" --format '{{index .RepoDigests 0}}')
+          [[ "${digest_ref%@sha256:*}" == "$IMAGE_REPOSITORY" ]]
+          printf 'RELEASE_DIGEST=%s\n' "$digest_ref" >> "$GITHUB_ENV"
+          printf 'Image: `%s`\n\nDigest: `%s`\n' "$RELEASE_IMAGE" "$digest_ref" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Update IMServerless and verify Rancher rollout
+        if: ${{ env.RELEASE == 'true' && env.DEPLOY == 'true' }}
+        run: |
+          set -euo pipefail
+          cd "$RELEASE_SOURCE"
+          "$RELEASE_VENV/bin/python" -m automation deploy --branch "$RELEASE_BRANCH" \
+            --image "$RELEASE_DIGEST" --kubeconfig "$KUBECONFIG" \
+            --context "$RANCHER_CONTEXT" --hostname "${IMSERVERLESS_HOSTNAME:-}" \
+            --owner "$IMSERVERLESS_OWNER" --domain "$IMSERVERLESS_DOMAIN"
+
+      - name: Remove job credentials and temporary tooling
+        if: ${{ always() }}
+        run: |
+          if [[ -n "${KUBECONFIG:-}" ]]; then rm -f -- "$KUBECONFIG"; fi
+          if [[ -n "${DOCKER_CONFIG:-}" ]]; then rm -rf -- "$DOCKER_CONFIG"; fi
+          if [[ -n "${RELEASE_VENV:-}" ]]; then rm -rf -- "$RELEASE_VENV"; fi
+          if [[ "${RELEASE_SOURCE:-}" == "$RUNNER_TEMP"/release-source-* ]]; then rm -rf -- "$RELEASE_SOURCE"; fi

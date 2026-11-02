@@ -1,0 +1,49 @@
+# Synthetic offline fixture; never deployed.
+action: create
+branches:
+  release: ''
+  sandbox: -sandbox
+containers:
+- environmentvariable:
+    ENV_MODE: test
+    SCRIPT_NAME: example
+  image: amr-registry.caas.intel.com/soia/example-app:pending
+  resources:
+    requests:
+      cpu: 2
+      gpu:
+        quantity: 0
+        type: nvidia.com/gpu
+      mem: 1000
+  usesInferenceClient: true
+  volume:
+  - name: data
+    mountpath: /mnt/data
+    networkpath: //files.example/data
+    claim: ''
+deadline: ''
+dnshostname: example-app.s33prod.mfg.intel.com
+funcname: example-app
+loglabel: python-ecs
+maxinstances: 1
+mininstances: 1
+namespace: icmpcs-soims
+project:
+  description: Replace with your application description
+  name: Example application
+secrets:
+  check:
+    example-share:
+    - username
+    - password
+  env:
+    example-runtime:
+    - SERVICE_USER
+    - SERVICE_TOKEN
+    example-api:
+    - API_KEY
+    - API_CONFIG
+  pull: itcaas-regcred
+targetclients: []
+targetname: active
+version: '1.0'

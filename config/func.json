@@ -1,0 +1,5 @@
+{
+    "functiontype": "py",
+    "functionlib": "main.py",
+    "functionhosturl": "0.0.0.0:50002"
+}

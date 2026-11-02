@@ -1,0 +1,8 @@
+*
+!main.py
+!pipeline/
+!pipeline/*.py
+!config/
+!config/func.json
+!requirements.txt
+!dockerfile
