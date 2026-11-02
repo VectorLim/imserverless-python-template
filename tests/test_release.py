@@ -1,4 +1,4 @@
-"""Offline release contract checks: python -m unittest -v test_release."""
+"""Offline release contract checks: python -m unittest -v tests.test_release."""
 
 import base64
 from contextlib import contextmanager
@@ -20,7 +20,7 @@ from automation.target import (
     release_branches,
 )
 
-CONFIG = ROOT / "tests/fixtures/release.yaml"
+CONFIG = Path(__file__).parent / "fixtures/release.yaml"
 TARGET = Target(CONFIG)
 IMAGE = TARGET.repository + "@sha256:" + "a" * 64
 HOST = "example-app.s33prod.mfg.intel.com"

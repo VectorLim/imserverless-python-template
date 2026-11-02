@@ -13,11 +13,11 @@ the offline release checks need PyYAML.
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m unittest -v test_main test_release
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 .\.venv\Scripts\python.exe main.py
 ```
 
-Replace `pipeline/example.py` with your logic, update dispatch in `main.py`, and update `test_main.py`.
+Replace `pipeline/example.py` with your logic, update dispatch in `main.py`, and update `tests/test_main.py`.
 Keep the `handle(job_id, context, header, body) -> (bool, str, str)` contract. Unknown scripts and unsupported
 modes fail explicitly. The example only supports `ENV_MODE=test` and makes no external calls or writes.
 The release helper also requires test mode. Enabling real business writes requires a deliberate code and test change;
@@ -67,6 +67,6 @@ Tests, release tools, runner files, `.env`, and local secrets are excluded.
 | `automation/` | Offline plan, credential checks, digest deployment and rollout verification |
 | `.github/workflows/release.yml` | Build, test, push and optional deployment |
 | `runner/` | Optional repository-level runner setup from Windows / Docker Desktop |
-| `test_main.py`, `test_release.py` | Offline application and release contract tests |
+| `tests/test_main.py`, `tests/test_release.py` | Offline application and release contract tests |
 
 See [design provenance](docs/template-decisions.md) for the recent Copilot decisions carried into this template.

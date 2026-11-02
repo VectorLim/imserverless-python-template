@@ -73,7 +73,7 @@ jobs:
           set -euo pipefail
           cd "$RELEASE_SOURCE"
           test "$(docker info --format '{{.OSType}}')" = linux
-          "$RELEASE_VENV/bin/python" -m unittest -v test_release
+          "$RELEASE_VENV/bin/python" -m unittest -v tests.test_release
 
       - name: Prepare deployment credentials and check prerequisites
         if: ${{ env.RELEASE == 'true' && env.DEPLOY == 'true' }}
@@ -149,10 +149,8 @@ jobs:
           check_container="release-check-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           trap 'docker rm -f "$check_container" >/dev/null 2>&1 || true' EXIT
           docker create --name "$check_container" --network none --entrypoint python \
-            "$RELEASE_IMAGE" -m unittest -v test_main >/dev/null
-          for test_file in test_main.py; do
-            docker cp "$test_file" "$check_container:/app/$test_file"
-          done
+            "$RELEASE_IMAGE" -m unittest -v tests.test_main >/dev/null
+          docker cp tests "$check_container:/app/tests"
           docker start -a "$check_container"
           test "$(docker inspect "$check_container" --format '{{.State.ExitCode}}')" = 0
 
